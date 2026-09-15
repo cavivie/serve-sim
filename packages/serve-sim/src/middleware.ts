@@ -4,7 +4,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { createServer as createNetServer } from "net";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
-import type { IncomingMessage, ServerResponse } from "http";
+import { request as httpRequest, type IncomingMessage, type ServerResponse } from "http";
 import type { Socket } from "net";
 // `ws` (kept external in the build) supplies a WebSocket *client* for the
 // helper/devtools proxy. Node only exposes a global `WebSocket` on newer LTS
@@ -1365,6 +1365,21 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     const helperTarget = helperProxyTarget(rawUrl, helperPrefix);
     if (helperTarget) {
       const device = helperTarget.device ?? selectedDevice;
+      const helper = selectServeSimState(await readServeSimStates(), device);
+      if (helper?.platform === "android") {
+        const upstream = httpRequest({ hostname: "127.0.0.1", port: helper.port,
+          path: helperTarget.upstreamPath, method: req.method }, (response) => {
+          res.writeHead(response.statusCode ?? 502, response.headers);
+          response.pipe(res);
+        });
+        upstream.on("error", () => {
+          if (!res.headersSent) res.writeHead(502);
+          res.end();
+        });
+        res.on("close", () => upstream.destroy());
+        req.pipe(upstream);
+        return;
+      }
       // The device's helper endpoints are served from an in-process
       // NativeCapture/NativeHid DeviceSession.
       if (serveHelperInProcess(req, res, device, helperTarget.upstreamPath)) return;
@@ -2271,9 +2286,15 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     }
     const device = helperTarget.device ?? selectedDevice;
     if (helperTarget.upstreamPath === "/ws") {
-      // HID input is delivered to the in-process DeviceSession.
-      if (attachHidInProcess(req, socket, head, device)) return;
-      socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
+      void readServeSimStates().then((states) => {
+        const helper = selectServeSimState(states, device);
+        if (helper?.platform === "android") {
+          bridgeWebSocketFrames(req, socket, head, `ws://127.0.0.1:${helper.port}/ws`);
+          return;
+        }
+        if (attachHidInProcess(req, socket, head, device)) return;
+        socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
+      }).catch(() => socket.destroy());
       return;
     }
     socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
