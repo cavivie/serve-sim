@@ -43,7 +43,9 @@ void SimCamLogSwallowedRuntimeError(NSString *via, id object, NSDictionary *user
 @end
 @interface SimCamFakeDevice : AVCaptureDevice
 @end
-@interface SimCamFakeConnection : AVCaptureConnection
+// Protocol-compatible stand-in: never run AVFoundation teardown on an
+// object whose private capture-connection state was not initialized.
+@interface SimCamFakeConnection : NSObject
 @end
 @interface SimCamFakeResolvedPhotoSettings : AVCaptureResolvedPhotoSettings
 @end

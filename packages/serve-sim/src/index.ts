@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { attachIosCamera } from "./ios-camera-attach";
 import { Command, InvalidArgumentError } from "commander";
 import { execSync, spawn as nodeSpawn, type ChildProcess } from "child_process";
 import { existsSync, mkdirSync, openSync, closeSync, readSync, readFileSync, unlinkSync, writeFileSync } from "fs";
@@ -444,19 +445,8 @@ function bootDevice(udid: string): void {
       }
     }
   }
-  // Ensure Simulator.app is running so the display/framebuffer pipeline is
-  // wired up. `-g` = don't bring to foreground; safe to call even if already
-  // running. A short timeout keeps us from hanging on headless macOS hosts
-  // (e.g. GitHub Actions runners) where `open` can block indefinitely waiting
-  // for a window server that never arrives — in that environment the test
-  // harness is expected to have already driven the sim via simctl.
-  try {
-    execSync("open -ga Simulator", {
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 3_000,
-    });
-  } catch {}
+  // CoreSimulator runs without Simulator.app; keep browser previews windowless.
+
 }
 
 function getLocalNetworkIP(): string | null {
@@ -1668,6 +1658,7 @@ async function camera(args: string[]) {
   let filePath: string | undefined;
   let webcam: string | true | undefined;
   let stopWebcam = false;
+  let injectionMode: "lldb" | "dylib" = "lldb";
   let listWebcams = false;
   let forceBuild = false;
   let quiet = false;
@@ -1686,6 +1677,12 @@ async function camera(args: string[]) {
       const next = args[i + 1];
       if (next && !next.startsWith("-")) { webcam = next; i++; }
       else { webcam = true; }
+      continue;
+    }
+    if (a === "--injection-mode") {
+      const mode = args[++i];
+      if (mode !== "lldb" && mode !== "dylib") throw new Error("--injection-mode must be lldb or dylib");
+      injectionMode = mode;
       continue;
     }
     if (a === "--list-webcams") { listWebcams = true; continue; }
@@ -1709,7 +1706,8 @@ async function camera(args: string[]) {
        serve-sim camera --list-webcams
        serve-sim camera --stop-webcam [-d udid]
 
-Launches the simulator app with a synthetic camera feed injected. The
+Attaches to the running simulator app using LLDB by default.
+Use --injection-mode dylib to restart the app with launch-time injection. The
 host helper streams BGRA frames (default: an animated placeholder) into
 shared memory; the dylib swizzles AVFoundation so the app reads them.
 
@@ -1721,6 +1719,7 @@ Source options (pick one; default is placeholder):
       --webcam [name]        Live host webcam (default: built-in front camera)
 
 Other:
+      --injection-mode <lldb|dylib>  LLDB attach (default), or dylib launch (restarts app)
   -d, --device <udid|name>   Target a specific simulator (default: booted)
       --mirror [on|off|auto] Override preview mirroring (default: auto =
                              front mirrored, back not). Data-output buffers
@@ -1938,41 +1937,47 @@ Examples:
     } catch {} // non-fatal; dylib falls back to env or default
   }
 
-  // Always (re)launch the named bundle with the dylib. The helper feeds a
-  // single shm region keyed by udid, so multiple apps on the same simulator
-  // can attach to the same camera stream — but each one has to be launched
-  // with DYLD_INSERT_LIBRARIES, which means a terminate+relaunch every time
-  // we want to bring a new app into the set. Source-only hot-swaps go
-  // through `camera switch`, not this path.
-  try {
-    execSync(`xcrun simctl privacy "${udid}" grant camera "${bundleId}"`, {
-      stdio: "ignore",
-    });
-  } catch {}
-  try {
-    execSync(`xcrun simctl terminate "${udid}" "${bundleId}"`, { stdio: "ignore" });
-  } catch {}
+  let pid: number | null;
+  if (injectionMode === "lldb") {
+    pid = attachIosCamera(udid, bundleId, dylib, shmName, mirror);
+  } else {
+    // Always (re)launch the named bundle with the dylib. The helper feeds a
+    // single shm region keyed by udid, so multiple apps on the same simulator
+    // can attach to the same camera stream — but each one has to be launched
+    // with DYLD_INSERT_LIBRARIES, which means a terminate+relaunch every time
+    // we want to bring a new app into the set. Source-only hot-swaps go
+    // through `camera switch`, not this path.
+    try {
+      execSync(`xcrun simctl privacy "${udid}" grant camera "${bundleId}"`, {
+        stdio: "ignore",
+      });
+    } catch {}
+    try {
+      execSync(`xcrun simctl terminate "${udid}" "${bundleId}"`, { stdio: "ignore" });
+    } catch {}
 
-  const env = {
-    ...process.env,
-    SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: dylib,
-    SIMCTL_CHILD_SIMCAM_SHM_NAME: shmName,
-    ...(mirror !== "auto" ? { SIMCTL_CHILD_SIMCAM_MIRROR_MODE: mirror } : {}),
-  };
+    const env = {
+      ...process.env,
+      SIMCTL_CHILD_DYLD_INSERT_LIBRARIES: dylib,
+      SIMCTL_CHILD_SIMCAM_SHM_NAME: shmName,
+      ...(mirror !== "auto" ? { SIMCTL_CHILD_SIMCAM_MIRROR_MODE: mirror } : {}),
+    };
 
-  let stdoutBuf = "";
-  try {
-    stdoutBuf = execSync(`xcrun simctl launch "${udid}" "${bundleId}"`, {
-      env,
-      encoding: "utf-8",
-    });
-  } catch (e: any) {
-    console.error(`simctl launch failed: ${e?.stderr ?? e?.message ?? e}`);
-    process.exit(1);
+    let stdoutBuf = "";
+    try {
+      stdoutBuf = execSync(`xcrun simctl launch "${udid}" "${bundleId}"`, {
+        env,
+        encoding: "utf-8",
+      });
+    } catch (e: any) {
+      console.error(`simctl launch failed: ${e?.stderr ?? e?.message ?? e}`);
+      process.exit(1);
+    }
+
+    const pidMatch = stdoutBuf.trim().match(/:\s*(\d+)\s*$/);
+    pid = pidMatch ? Number(pidMatch[1]) : null;
+
   }
-
-  const pidMatch = stdoutBuf.trim().match(/:\s*(\d+)\s*$/);
-  const pid = pidMatch ? Number(pidMatch[1]) : null;
 
   if (helperPid) recordInjectedBundle(udid, bundleId, helperPid);
 
@@ -1988,6 +1993,8 @@ Examples:
     mirror,
     hotSwapped: false,
     helperRelaunched: helperRes.relaunched,
+    injectionMode,
+    appRelaunched: injectionMode === "dylib",
   };
   if (quiet) {
     console.log(JSON.stringify(result));
@@ -2292,11 +2299,18 @@ program
 // still appear in `--help` and route to those parsers verbatim.
 program
   .command("camera")
-  .description("Inject a synthetic camera feed and launch an app (see `camera --help`)")
+  .description("Attach a synthetic camera feed, or launch with injection (see `camera --help`)")
   .allowUnknownOption(true)
   .helpOption(false)
   .argument("[args...]")
-  .action((args: string[]) => camera(args));
+  .action(async (args: string[]) => {
+    try {
+      await camera(program.opts().quiet ? [...args, "--quiet"] : args);
+    } catch (error: any) {
+      console.error(error?.message ?? String(error));
+      process.exitCode = 1;
+    }
+  });
 
 program
   .command("permissions")

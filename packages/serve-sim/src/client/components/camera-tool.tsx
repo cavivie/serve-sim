@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { CameraInjectionMode } from "./camera-injection-mode";
+import { createPortal } from "react-dom";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import { FlipHorizontal2, Images, X } from "lucide-react";
 import { PlayGlyph, StopGlyph, ReloadIcon } from "../icons";
 import { execOnHost, shellEscape } from "../utils/exec";
@@ -209,10 +211,14 @@ export function CameraTool({
   const dragCountRef = useRef(0);
   const [uploading, setUploading] = useState(false);
   const [sourceMenuOpen, setSourceMenuOpen] = useState(false);
+  const sourceTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const sourcePopupRef = useRef<HTMLDivElement | null>(null);
+  const [sourcePosition, setSourcePosition] = useState({ top: 0, left: 0 });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [webcams, setWebcams] = useState<CamWebcam[]>([]);
   const [webcamLoading, setWebcamLoading] = useState(false);
   const [webcamId, setWebcamId] = useState<string>("");
+  const [injectionMode, setInjectionMode] = useState<"lldb" | "dylib">("lldb");
   const [mirror, setMirror] = useState<CamMirror>("off");
   const [pendingPrimary, setPendingPrimary] = useState<"inject" | "stop" | null>(null);
   const [pendingAux, setPendingAux] = useState<"mirror" | "switch" | null>(null);
@@ -429,7 +435,7 @@ export function CameraTool({
     setError(null);
     setStatus(null);
     try {
-      const flags: string[] = ["camera", shellEscape(bundleId), "-d", udid, "--quiet"];
+      const flags: string[] = ["camera", shellEscape(bundleId), "-d", udid, "--quiet", "--injection-mode", injectionMode];
       if (source === "image" || source === "video") {
         if (!filePath.trim()) {
           setError("Drop a file into the panel or pick another source.");
@@ -451,10 +457,10 @@ export function CameraTool({
       try {
         const json = JSON.parse(res.stdout.trim()) as {
           source?: string; pid?: number; helperPid?: number;
-          hotSwapped?: boolean; helperRelaunched?: boolean;
+          hotSwapped?: boolean; helperRelaunched?: boolean; appRelaunched?: boolean;
         };
         helperPid = json.helperPid ?? null;
-        const verb = json.helperRelaunched === false ? "Attached" : "Injected";
+        const verb = json.appRelaunched ? "Restarted and injected" : "Attached";
         const pidStr = json.pid ? ` pid ${json.pid}` : "";
         const helper = json.helperPid ? `, helper pid ${json.helperPid}` : "";
         setStatus(`${verb} ${json.source ?? source} into ${bundleId}${pidStr}${helper}`);
@@ -469,7 +475,7 @@ export function CameraTool({
     } finally {
       setPendingPrimary(null);
     }
-  }, [bundleId, udid, source, filePath, webcamId, mirror, cliPrefix, reportSourceError]);
+  }, [bundleId, udid, source, filePath, webcamId, mirror, injectionMode, cliPrefix, reportSourceError]);
 
   const autoSwapKey = injected
     ? `${source}::${source === "webcam" ? webcamId : ""}::${source === "image" || source === "video" ? filePath : ""}`
@@ -625,6 +631,33 @@ export function CameraTool({
     if (file) await handleSourceFile(file);
   }, [handleSourceFile]);
 
+  useLayoutEffect(() => {
+    if (!sourceMenuOpen) return;
+    const place = () => {
+      const trigger = sourceTriggerRef.current?.getBoundingClientRect();
+      const popup = sourcePopupRef.current;
+      if (!trigger || !popup) return;
+      const margin = 8;
+      const below = trigger.bottom + 6;
+      const top = below + popup.offsetHeight <= window.innerHeight - margin
+        ? below : Math.max(margin, trigger.top - popup.offsetHeight - 6);
+      setSourcePosition({
+        top,
+        left: Math.max(margin, Math.min(trigger.left, window.innerWidth - popup.offsetWidth - margin)),
+      });
+    };
+    place();
+    const onScroll = (e: Event) => {
+      if (!sourcePopupRef.current?.contains(e.target as Node)) place();
+    };
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [sourceMenuOpen, webcams, webcamLoading]);
+
   useEffect(() => {
     if (!sourceMenuOpen) return;
     const onDocDown = (e: MouseEvent) => {
@@ -714,11 +747,14 @@ export function CameraTool({
         onDrop={onDrop}
         className="flex flex-col gap-2.5"
       >
-          <p className="m-0 text-[10px] leading-[1.5] text-white/45">
-            Replaces the simulator's camera feed by injecting a dylib at app launch
-            and streaming frames into shared memory. Pick media or a webcam,
-            then Play to inject into the foreground app.
-          </p>
+          <CameraInjectionMode value={injectionMode} disabled={isBusy || uploading}
+            onChange={value => setInjectionMode(value as "lldb" | "dylib")}
+            description={injectionMode === "lldb"
+              ? "Attaches without restarting. You may need to reopen the camera or restart the app and retry. Attachment can fail for some apps."
+              : "Restarts the app to load the camera library. Save your work before pressing Play."}>
+            <option value="lldb">LLDB attach</option>
+            <option value="dylib">Dylib launch</option>
+          </CameraInjectionMode>
 
           <input
             ref={fileInputRef}
@@ -775,6 +811,7 @@ export function CameraTool({
           <div className="flex items-stretch gap-1.5">
             <div className="relative" data-camera-source-menu>
               <button
+                ref={sourceTriggerRef}
                 onClick={() => setSourceMenuOpen((o) => !o)}
                 className="h-full min-h-[36px] w-10 flex items-center justify-center bg-transparent border border-white/12 text-white/85 rounded-[7px] cursor-pointer p-0 hover:bg-white/[0.06] hover:border-white/20 hover:text-white"
                 aria-haspopup="menu"
@@ -789,10 +826,14 @@ export function CameraTool({
                 <Images size={20} strokeWidth={2} />
               </button>
 
-              {sourceMenuOpen && (
+              {sourceMenuOpen && createPortal(
                 <div
+                  ref={sourcePopupRef}
+                  data-camera-source-menu
+                  style={sourcePosition}
+                  onKeyDown={(e) => { if (e.key === "Escape") { setSourceMenuOpen(false); sourceTriggerRef.current?.focus(); } }}
                   role="menu"
-                  className="absolute top-[calc(100%+6px)] left-0 z-10 min-w-[200px] flex flex-col gap-px p-1 bg-panel border border-white/8 rounded-[7px] shadow-[0_8px_24px_rgba(0,0,0,0.4)]"
+                  className="fixed z-50 max-h-[calc(100vh-16px)] overflow-y-auto min-w-[200px] flex flex-col gap-px p-1 bg-panel border border-white/8 rounded-[7px] shadow-[0_8px_24px_rgba(0,0,0,0.4)]"
                 >
                   <button
                     role="menuitem"
@@ -834,7 +875,8 @@ export function CameraTool({
                       </button>
                     );
                   })}
-                </div>
+                </div>,
+                document.body,
               )}
             </div>
 
@@ -851,7 +893,7 @@ export function CameraTool({
                 primary.kind === "stop" ? "Stop the camera helper and terminate injected apps" :
                 primary.kind === "attach" ? `Inject ${bundleId} so it joins the camera feed` :
                 !bundleId ? "Bring an app to the foreground first" :
-                "Start: inject the dylib and launch the foreground app with the chosen source"
+                injectionMode === "lldb" ? "Attach to the running app with LLDB" : "Restart the app with dylib injection"
               }
               aria-pressed={primary.kind === "stop"}
               aria-label={primary.kind === "stop" ? "Stop" : "Play"}

@@ -298,12 +298,12 @@ static AVCaptureInputPort *SimCamFakeInputPortForInput(AVCaptureInput *input, AV
     BOOL _automaticallyAdjustsVideoMirroring;
     BOOL _enabled;
 }
-+ (instancetype)allocWithZone:(NSZone *)zone {
-    return class_createInstance([SimCamFakeConnection class], 0);
+- (BOOL)isKindOfClass:(Class)cls {
+    return cls == AVCaptureConnection.class || [super isKindOfClass:cls];
 }
 + (instancetype)connectionForOutput:(AVCaptureOutput *)output
                            position:(AVCaptureDevicePosition)pos {
-    SimCamFakeConnection *c = [self alloc];
+    SimCamFakeConnection *c = [self new];
     if (c) {
         c->_outputRef = output;
         c->_position = pos;
@@ -421,18 +421,18 @@ AVCaptureConnection *SimCamFakeConnectionForOutput(AVCaptureOutput *out) {
 
 #pragma mark - SimCamFakeInputPort
 
-@interface SimCamFakeInputPort : AVCaptureInputPort
+@interface SimCamFakeInputPort : NSObject
 @end
 
 @implementation SimCamFakeInputPort {
     __weak AVCaptureInput *_inputRef;
     AVCaptureDevicePosition _position;
 }
-+ (instancetype)allocWithZone:(NSZone *)zone {
-    return class_createInstance([SimCamFakeInputPort class], 0);
+- (BOOL)isKindOfClass:(Class)cls {
+    return cls == AVCaptureInputPort.class || [super isKindOfClass:cls];
 }
 + (instancetype)portForInput:(AVCaptureInput *)input position:(AVCaptureDevicePosition)position {
-    SimCamFakeInputPort *p = [self alloc];
+    SimCamFakeInputPort *p = [self new];
     if (p) {
         p->_inputRef = input;
         p->_position = position;
