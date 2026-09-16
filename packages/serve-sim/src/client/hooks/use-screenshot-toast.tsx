@@ -29,7 +29,7 @@ function timestampSlug(): string {
   return new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23);
 }
 
-export function useScreenshotToast(deviceUdid?: string | null) {
+export function useScreenshotToast(deviceUdid?: string | null, platform: "ios" | "android" = "ios") {
   const toastRef = useRef<ScreenshotToast | null>(null);
   const toastIdRef = useRef<string | null>(null);
   const dismissTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -110,8 +110,11 @@ export function useScreenshotToast(deviceUdid?: string | null) {
     // path would survive shellEscape() as a literal tilde and break the later
     // `open -R`. The command echoes the path it wrote on success.
     const file = `$HOME/Desktop/serve-sim-screenshot-${timestampSlug()}.png`;
+    const captureCommand = platform === "android"
+      ? `adb -s ${shellEscape(deviceUdid)} exec-out screencap -p > "$F"`
+      : `xcrun simctl io ${shellEscape(deviceUdid)} screenshot "$F"`;
     const capCmd =
-      `F="${file}"; xcrun simctl io ${shellEscape(deviceUdid)} screenshot "$F" && printf '%s' "$F"`;
+      `F="${file}"; ${captureCommand} && test -s "$F" && printf '%s' "$F"`;
 
     let path: string;
     try {
@@ -150,7 +153,7 @@ export function useScreenshotToast(deviceUdid?: string | null) {
     } catch {
       // ignore — the pill is fully functional without a preview.
     }
-  }, [deviceUdid, render]);
+  }, [deviceUdid, platform, render]);
 
   return { capture, reveal, dismiss };
 }

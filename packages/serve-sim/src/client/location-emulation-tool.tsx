@@ -1,6 +1,7 @@
+import { simEndpoint } from "./utils/sim-endpoint";
 // Location emulation panel + lightweight 3D trail viz.
 //
-// Drives `xcrun simctl location <udid> set <lat>,<lng>` on a fixed cadence
+// Drives iOS simctl or Android EmulatorController.setGps on a fixed cadence
 // while a requestAnimationFrame loop advances the player position along a
 // pre-densified route. The route is rendered to a 2D canvas with a manual
 // orbiting orthographic camera — same family as Any Distance's RouteScene
@@ -39,6 +40,7 @@ import {
   WalkGlyph,
 } from "./icons";
 import { CollapsibleSection } from "./components/collapsible-section";
+import { locationSetCommand, type LocationPlatform } from "./utils/location-commands";
 import { Select } from "./components/select";
 
 const TRAIL_MORPH_MS = 650;
@@ -66,9 +68,11 @@ const INITIAL_PLAYBACK: PlaybackState = { status: "idle", arc: 0, elapsedMs: 0 }
 
 export function LocationEmulationTool({
   udid,
+  platform = "ios",
   exec,
 }: {
   udid: string;
+  platform?: LocationPlatform;
   exec: ExecFn;
 }) {
   const [open, setOpen] = useState(false);
@@ -92,10 +96,25 @@ export function LocationEmulationTool({
   const speedRef = useRef(defaultSpeed(mode) * multiplier);
   const elapsedRef = useRef(0);
   const trailRef = useRef(prepared);
-  // Captured at the start of a session — the lat/lng the simulator was at
-  // when the user first hit play. Restored on stop so the device returns to
-  // where they were before the simulation started.
-  const sessionOriginRef = useRef<{ lat: number; lng: number } | null>(null);
+  // Route start captured at Play; Stop returns here (not the previous device location).
+  const sessionOriginRef = useRef<RoutePoint | null>(null);
+  const pendingLocation = useRef<Promise<ExecResult>>(Promise.resolve({ stdout: "", stderr: "", exitCode: 0 }));
+  const sendLocation = useCallback((point: RoutePoint, speed = 0) => {
+    const next = pointAtDistance(trailRef.current, point.arc + 1);
+    const bearing = (Math.atan2(next.x - point.x, -(next.z - point.z)) * 180 / Math.PI + 360) % 360;
+    const altitude = point.y + trailRef.current.rawMinAlt;
+    const operation = pendingLocation.current.catch(() => ({ stdout: "", stderr: "", exitCode: 1 })).then(async () => {
+      if (platform !== "android") return exec(locationSetCommand(platform, udid, point));
+      const response = await fetch(simEndpoint("android-location"), {
+        method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + (window.__SIM_PREVIEW__?.execToken ?? "") },
+        body: JSON.stringify({ device: udid, lat: point.lat, lng: point.lng, altitude, speed, bearing }),
+      });
+      const data = await response.json();
+      return { stdout: "", stderr: data.error ?? "", exitCode: response.ok ? 0 : 1 };
+    });
+    pendingLocation.current = operation;
+    return operation;
+  }, [platform, udid, exec]);
 
   useEffect(() => { speedRef.current = defaultSpeed(mode) * multiplier; }, [mode, multiplier]);
   // Morph state — when the trail changes we keep the previous prepared trail
@@ -140,7 +159,8 @@ export function LocationEmulationTool({
         const total = trailRef.current.totalDistance;
         if (!trailRef.current.trail.loop && arcRef.current >= total) {
           arcRef.current = total;
-          statusRef.current = "paused";
+          void sendLocation(pointAtDistance(trailRef.current, arcRef.current)).then(res => { if (res.exitCode) setError(res.stderr); }).catch(e => setError(String(e)));
+      statusRef.current = "paused";
           // Surface the stop to React state so the UI updates the toggle.
           setPlayback({ status: "paused", arc: total, elapsedMs: elapsedRef.current });
         }
@@ -181,7 +201,7 @@ export function LocationEmulationTool({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [sendLocation]);
 
   // Periodically reflect arc/elapsed into React state for the stats row,
   // throttled to keep re-renders cheap (the 60fps animation lives in refs).
@@ -214,11 +234,10 @@ export function LocationEmulationTool({
       if (now - lastPushed < LOCATION_PUSH_INTERVAL_MS) return;
       lastPushed = now;
       const pt = pointAtDistance(trailRef.current, arcRef.current);
-      const cmd = `xcrun simctl location ${udid} set ${pt.lat.toFixed(7)},${pt.lng.toFixed(7)}`;
-      inflight = exec(cmd).then((res) => {
+      inflight = sendLocation(pt, speedRef.current).then((res) => {
         if (cancelled) return;
         if (res.exitCode !== 0) {
-          setError(parseSimctlError(res.stderr) || "simctl location set failed");
+          setError(parseSimctlError(res.stderr) || "Location update failed");
         } else {
           setError(null);
         }
@@ -233,11 +252,12 @@ export function LocationEmulationTool({
       cancelled = true;
       clearInterval(id);
     };
-  }, [playback.status, udid, exec]);
+  }, [playback.status, udid, platform, exec, sendLocation]);
 
   // ── Controls ─────────────────────────────────────────────────────────────
   const onPlayPause = useCallback(() => {
     if (statusRef.current === "playing") {
+      void sendLocation(pointAtDistance(trailRef.current, arcRef.current)).then(res => { if (res.exitCode) setError(res.stderr); }).catch(e => setError(String(e)));
       statusRef.current = "paused";
       setPlayback((p: PlaybackState) => ({ ...p, status: "paused" }));
       return;
@@ -249,7 +269,7 @@ export function LocationEmulationTool({
     }
     if (sessionOriginRef.current == null) {
       const start = pointAtDistance(trailRef.current, arcRef.current);
-      sessionOriginRef.current = { lat: start.lat, lng: start.lng };
+      sessionOriginRef.current = start;
     }
     statusRef.current = "playing";
     setPlayback((p: PlaybackState) => ({
@@ -258,7 +278,7 @@ export function LocationEmulationTool({
       arc: arcRef.current,
       elapsedMs: elapsedRef.current,
     }));
-  }, []);
+  }, [sendLocation]);
 
   const onStop = useCallback(() => {
     statusRef.current = "idle";
@@ -267,32 +287,25 @@ export function LocationEmulationTool({
     setPlayback(INITIAL_PLAYBACK);
     const origin = sessionOriginRef.current;
     sessionOriginRef.current = null;
-    const cmd = origin
-      ? `xcrun simctl location ${udid} set ${origin.lat.toFixed(7)},${origin.lng.toFixed(7)}`
-      : `xcrun simctl location ${udid} clear`;
-    void exec(cmd).then((res) => {
-      if (res.exitCode !== 0) setError(parseSimctlError(res.stderr) || null);
-      else setError(null);
-    });
-  }, [exec, udid]);
+    if (!origin) return;
+    void sendLocation(origin).then((res) => {
+      setError(res.exitCode !== 0 ? res.stderr || "Location reset failed" : null);
+    }).catch(e => setError(String(e)));
+  }, [sendLocation]);
 
   const onTrailChange = useCallback((id: string) => {
+    if (statusRef.current !== "idle") void sendLocation(pointAtDistance(trailRef.current, arcRef.current)).catch(e => setError(String(e)));
     setTrailId(id);
     const next = DEFAULT_TRAILS.find((t) => t.id === id);
     if (next) setMode(next.mode);
-  }, []);
+  }, [sendLocation]);
 
-  // Stop simulating when the panel unmounts so we don't leave the simulator
-  // parked on the last waypoint. If we captured a session origin, restore it
-  // first so the device lands back where the user started.
+  // Return to the route start with zero speed when closing the panel.
   useEffect(() => () => {
     if (statusRef.current === "idle") return;
     const origin = sessionOriginRef.current;
-    const cmd = origin
-      ? `xcrun simctl location ${udid} set ${origin.lat.toFixed(7)},${origin.lng.toFixed(7)}`
-      : `xcrun simctl location ${udid} clear`;
-    void exec(cmd).catch(() => {});
-  }, [exec, udid]);
+    if (origin) void sendLocation(origin).catch(() => {});
+  }, [sendLocation]);
 
   // ── Render ───────────────────────────────────────────────────────────────
   const playing = playback.status === "playing";
@@ -372,7 +385,7 @@ export function LocationEmulationTool({
               onClick={onStop}
               className="flex items-center justify-center gap-1.5 py-2 px-3 border border-white/12 rounded-[7px] text-[12px] font-medium bg-transparent text-white/85 cursor-pointer font-[inherit] enabled:hover:bg-white/[0.06] enabled:hover:border-white/20 enabled:hover:text-white disabled:opacity-40 disabled:cursor-not-allowed"
               disabled={playback.status === "idle" && playback.arc === 0}
-              title="Stop and clear simulated location"
+              title="Stop and return to route start"
             >
               <StopGlyph />
               <span>Stop</span>

@@ -146,15 +146,20 @@ export class DeviceSession {
   /** Begin capture. Throws if the device isn't booted. Idempotent. */
   start(): void {
     if (this.phase !== "unstarted") return;
-    this.capture.start();
     void (async () => {
+      await this.capture.start();
+      if (this.phase !== "running") return;
       const unsubscribe = await this.capture.subscribeMjpeg((frame) => this.onSharedMjpegFrame(frame));
       if (this.phase === "running") { // only if someone hasn't already stopped the capture
         this.unsubscribeMjpeg = unsubscribe;
       } else {
         unsubscribe();
       }
-    })();
+    })().catch((err) => {
+      console.warn(`[capture] ${this.udid}: subscription stopped`, String(err));
+      this.close();
+      if (sessions.get(this.udid) === this) sessions.delete(this.udid);
+    });
     this.phase = "running";
   }
 
@@ -216,10 +221,10 @@ export class DeviceSession {
         await waitForDrain(res);
         this.writeMjpegFrame(res, frame.data);
       });
-      if (res.writableEnded) unsubscribe();
+      if (res.writableEnded || res.destroyed) unsubscribe();
       res.on("close", unsubscribe);
       res.on("error", unsubscribe);
-    })();
+    })().catch(() => res.destroy());
   }
 
   handleAvcc(_req: IncomingMessage, res: ServerResponse): void {
@@ -240,10 +245,10 @@ export class DeviceSession {
         await waitForDrain(res);
         res.write(frame.data);
       });
-      if (res.writableEnded) unsubscribe();
+      if (res.writableEnded || res.destroyed) unsubscribe();
       res.on("close", unsubscribe);
       res.on("error", unsubscribe);
-    })();
+    })().catch(() => res.destroy());
   }
 
   handleConfig(_req: IncomingMessage, res: ServerResponse): void {

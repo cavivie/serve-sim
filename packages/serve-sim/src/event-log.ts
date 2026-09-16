@@ -321,6 +321,20 @@ export function eventLogEventForCommand(
 
   const status = statusFromExitCode(result?.exitCode);
   const commandDetail = commandResultDetails(result);
+  const adbIndex = tokens.findIndex((token) => /(?:^|\/)adb$/.test(token));
+  if (adbIndex >= 0 && tokens[adbIndex + 1] === "-s") {
+    const device = tokens[adbIndex + 2];
+    const args = tokens.slice(adbIndex + 3);
+    let action: string | undefined;
+    let summary = "";
+    if (args[0] === "exec-out" && args[1] === "screencap") { action = "screenshot"; summary = "Screenshot"; }
+    else if (args[0] === "emu" && args[1] === "geo" && args[2] === "fix") { action = "location"; summary = "Set location"; }
+    else if (args[0] === "shell" && args[1] === "am" && args[2] === "start" && args.includes("android.settings.APPLICATION_DETAILS_SETTINGS")) { action = "settings"; summary = "Open app settings"; }
+    else if (args[0] === "install") { action = "install"; summary = "Install app"; }
+    if (device && action) return { device, source: "exec", kind: "command", action, summary, status, details: commandDetail };
+    // Do not log background package queries or raw text/credentials.
+    return null;
+  }
   const simctl = simctlCommand(tokens);
   if (simctl) {
     const { verb, args } = simctl;

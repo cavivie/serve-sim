@@ -125,9 +125,22 @@ Multiple booted simulators are supported — pass several device names, or leave
 
 ### Camera
 
-`serve-sim camera <bundle-id>` replaces the simulator's camera feed for a single app. A small host-side helper writes BGRA frames into a POSIX shared-memory region; an injected dylib (`DYLD_INSERT_LIBRARIES`) swizzles AVFoundation inside the simulator process so the app reads from that region instead of the simulator's stub camera.
+Android emulators expose three injection modes in **Tools → Camera**:
 
-The helper is one-per-device and outlives any single app launch, so multiple apps on the same simulator can share the feed — just run `serve-sim camera <other-bundle-id>` again to relaunch the next app with the dylib attached. Source changes (`camera switch`) and mirror changes (`camera mirror`) flow through the helper's control socket and don't relaunch the app.
+| Mode | Sources | Applying changes |
+| --- | --- | --- |
+| Environment | Images, videos, host cameras | Emulator 36.6.11+. First setup may restart; subsequent source changes are live. Both virtual cameras share the source. |
+| Host Camera | Cameras connected to the host computer | Uses `-camera-back webcamN` and keeps the front camera emulated. Applying, changing or stopping the input restarts the emulator. |
+| Virtual Scene | Images on the wall or table of the 3D scene | Rear camera only. Entering the mode restarts; poster updates use the emulator console when available, otherwise restart with `-virtualscene-poster`. |
+
+Choose the mode and source, then press Play. Selecting a different mode does not restart immediately. Virtual Scene is a scene poster, not a full-frame image replacement. These controls are for emulators, not physical Android devices.
+
+
+`serve-sim camera <bundle-id>` defaults to LLDB attachment to a running app. Use `--injection-mode dylib` to explicitly restart the app with launch-time injection. LLDB may fail when another debugger is attached or the app cannot be debugged; reopening the camera page (or restarting the app and attaching again) may be needed. Failed attachment never silently restarts the app.
+
+The camera feed replaces the simulator's camera feed for a single app. A small host-side helper writes BGRA frames into a POSIX shared-memory region; an injected dylib (LLDB runtime loading, or `DYLD_INSERT_LIBRARIES` at launch) swizzles AVFoundation inside the simulator process so the app reads from that region instead of the simulator's stub camera.
+
+The helper is one-per-device and outlives any single app launch, so multiple apps on the same simulator can share the feed — run `serve-sim camera <other-bundle-id>` to attach to another running app, or add `--injection-mode dylib` to restart it with the library attached. Source changes (`camera switch`) and mirror changes (`camera mirror`) flow through the helper's control socket and don't relaunch the app.
 
 Sources:
 

@@ -26,7 +26,9 @@ export function DevicePlaceholder({
   busyLabel = "Starting…",
   error,
   onStart,
+  isEmulator = false,
 }: {
+  isEmulator?: boolean;
   name: string;
   runtime: string;
   chrome?: DeviceKitChromeDescriptor | null;
@@ -34,8 +36,9 @@ export function DevicePlaceholder({
   busy: boolean;
   busyLabel?: string;
   error: string | null;
-  onStart: () => void;
+  onStart: (showWindow: boolean) => void;
 }) {
+  const [showWindow, setShowWindow] = useState(false);
   const type = getDeviceType(name);
   const f = DEVICE_FRAMES[type];
   const activeAsset = placeholderAsset ?? null;
@@ -85,14 +88,21 @@ export function DevicePlaceholder({
 
       <div className="flex flex-col items-center gap-1 text-center">
         <div className="text-[17px] font-semibold text-white/90">{name}</div>
-        <div className="text-[13px] text-white/45">{runtimeLabel(runtime)} Simulator</div>
+        <div className="text-[13px] text-white/45">{runtimeLabel(runtime)}{isEmulator && runtime !== "Android Emulator" ? " Simulator" : ""}</div>
       </div>
 
       {error && <div className="text-danger text-[12px] font-mono max-w-90 text-center">{error}</div>}
 
+      {isEmulator && <label className="flex items-center gap-2 text-[13px] text-white/75 cursor-pointer">
+        <input type="checkbox" checked={showWindow} disabled={busy}
+          onChange={(event) => setShowWindow(event.target.checked)}
+          className="size-4 accent-blue-500" />
+        Show simulator window
+      </label>}
+
       <button
         type="button"
-        onClick={onStart}
+        onClick={() => onStart(isEmulator && showWindow)}
         disabled={busy}
         className={`flex items-center gap-2 px-5 py-2 rounded-full text-[14px] font-medium [transition:background_0.15s] ${
           busy

@@ -97,11 +97,13 @@ export function SettingRow({
   );
 }
 
-function TextSizeSlider({
+export function TextSizeSlider({
   value,
   disabled,
   onChange,
+  categories = TEXT_SIZE_CATEGORIES,
 }: {
+  categories?: readonly string[];
   value: number;
   disabled: boolean;
   onChange: (index: number) => void;
@@ -142,7 +144,7 @@ function TextSizeSlider({
     lastSent.current = null;
   }, [send]);
 
-  const max = TEXT_SIZE_CATEGORIES.length - 1;
+  const max = categories.length - 1;
   const shown = drag ?? value;
   const fill = `${(shown / max) * 100}%`;
   // Filled portion goes gray while disabled so the control doesn't read as
@@ -179,7 +181,7 @@ function TextSizeSlider({
         className={`h-[13px] w-full appearance-none rounded-full bg-transparent outline-none focus-visible:[outline:1.5px_solid_rgba(10,132,255,0.55)] focus-visible:outline-offset-4 ${disabled ? "cursor-default" : "cursor-pointer"} ${trackClasses} ${thumbClasses}`}
       />
       <span aria-hidden className="pointer-events-none mt-[3px] flex justify-between px-[5.5px]">
-        {TEXT_SIZE_CATEGORIES.map((category) => (
+        {categories.map((category) => (
           <span key={category} className="size-[2px] rounded-full bg-white/40" />
         ))}
       </span>
@@ -213,7 +215,7 @@ export function SettingSelect({
 }
 
 // Inline 14px glyphs, stroked at full opacity (no dimmed icons).
-const I = {
+export const I = {
   appearance: (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 2v2" />
@@ -292,7 +294,7 @@ export function SimulatorSettingsTool({
   udid: string;
   runtime: string | null;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const [state, setState] = useState<SettingsState | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -396,7 +398,7 @@ export function SimulatorSettingsTool({
       summary={
         <>
           <span className="text-[11px] font-semibold text-white/50 uppercase tracking-[0.08em] leading-none inline-flex items-center">
-            Simulator
+            Settings
           </span>
           <span />
         </>

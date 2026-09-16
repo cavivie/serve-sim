@@ -8,6 +8,7 @@ export interface AppDetails {
   shortVersion?: string;
   bundleVersion?: string;
   minOS?: string;
+  targetSdk?: string;
   executable?: string;
   appPath?: string;
   iconDataUrl?: string | null;
@@ -19,7 +20,14 @@ export async function fetchAppDetails(
   exec: (cmd: string) => Promise<ExecResult>,
   udid: string,
   bundleId: string,
+  platform: "ios" | "android" = "ios",
 ): Promise<Partial<AppDetails>> {
+  if (platform === "android") {
+    const prefix = `adb -s ${shellEscape(udid)} shell`;
+    const result = await exec(`${prefix} dumpsys package ${shellEscape(bundleId)}`);
+    if (result.exitCode !== 0) return { error: result.stderr.trim() || "App details unavailable" };
+    return parseAndroidAppDetails(result.stdout);
+  }
   const ctn = await exec(`xcrun simctl get_app_container ${udid} ${shellEscape(bundleId)} app`);
   if (ctn.exitCode !== 0) {
     return { error: ctn.stderr.trim() || "App not found on simulator" };
@@ -104,4 +112,19 @@ export function fetchAppIcon(
   });
   appIconCache.set(key, pending);
   return pending;
+}
+
+export function parseAndroidAppDetails(dump: string): Partial<AppDetails> {
+  const section = dump.match(/^\s*Packages:\s*$/m);
+  const details = section ? dump.slice(section.index) : dump;
+  const value = (pattern: RegExp) => details.match(pattern)?.[1]?.trim();
+  const shortVersion = value(/^\s*versionName=(.+)$/m);
+  const bundleVersion = value(/^\s*versionCode=(\d+)/m);
+  if (!bundleVersion) return { error: "Package information unavailable" };
+  return {
+    shortVersion, bundleVersion,
+    minOS: value(/\bminSdk=(\d+)/),
+    targetSdk: value(/\btargetSdk=(\d+)/),
+    appPath: value(/^\s*codePath=(.+)$/m),
+  };
 }

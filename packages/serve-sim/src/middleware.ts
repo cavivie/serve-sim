@@ -1,3 +1,8 @@
+import { androidPermissions } from "./android-permissions";
+import { setAndroidLocation } from "./android-location";
+import { controlAndroidScene } from "./android-scene-control";
+import { androidCameraStatus, beginAndroidCamera, androidHostCameras } from "./android-camera";
+import { androidAxSnapshot } from "./android-ax";
 import { readdirSync, readFileSync, existsSync, unlinkSync, watch, type FSWatcher } from "fs";
 import { execSync, spawn, exec, execFile, type ChildProcess, type ExecException } from "child_process";
 import { tmpdir } from "os";
@@ -15,12 +20,13 @@ import { createAxStreamerCache } from "./ax";
 import { getDeviceSession, closeDeviceSession, type HidSocket } from "./device-session";
 import {
   eventLogEventForCommand,
+  eventLogEventForHidMessage,
   readEventLog,
   recordEventLogEvent,
   subscribeEventLog,
 } from "./event-log";
 import { axFrontmostAsync } from "./native";
-import { inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
+import { rememberPreview, forgetPreview, rememberedPreviews, inProcessServeSimState, writeServeSimState, type ServeSimDeviceState } from "./state";
 import { debugMw } from "./debug";
 import {
   androidDeviceBootStatus,
@@ -105,7 +111,7 @@ type SimctlAllList = {
 
 type DevicePlatform = "ios" | "android";
 type ShutdownRequestBody = { udid?: string; platform?: unknown };
-type StartRequestBody = { udid?: string; platform?: unknown };
+type StartRequestBody = { udid?: string; platform?: unknown; showWindow?: boolean };
 type ReleaseRequestBody = { targetId?: string };
 type HighlightRequestBody = { targetId?: string; on?: boolean };
 type ExecRequestBody = { command?: string };
@@ -651,7 +657,7 @@ function writeWebSocketAccept(req: SimReq, socket: Socket): boolean {
   return true;
 }
 
-function bridgeWebSocketFrames(req: SimReq, socket: Socket, head: Buffer, upstreamUrl: string): void {
+function bridgeWebSocketFrames(req: SimReq, socket: Socket, head: Buffer, upstreamUrl: string, eventDevice?: string): void {
   if (!writeWebSocketAccept(req, socket)) return;
 
   const upstream = new WebSocket(upstreamUrl);
@@ -670,6 +676,17 @@ function bridgeWebSocketFrames(req: SimReq, socket: Socket, head: Buffer, upstre
   };
 
   const sendToUpstream = (frame: PendingWebSocketFrame) => {
+    if (eventDevice && frame.opcode === 0x2 && frame.payload.length) {
+      try {
+        const tag = frame.payload[0]!;
+        const payload = frame.payload.length > 1 ? JSON.parse(frame.payload.subarray(1).toString("utf8")) : {};
+        // Avoid filling the log with per-pixel pointer movement.
+        if (!(tag === 0x03 && payload.type === "move")) {
+          const event = eventLogEventForHidMessage(eventDevice, tag, payload);
+          if (event) recordEventLogEvent(event);
+        }
+      } catch { /* Invalid input remains the helper's responsibility. */ }
+    }
     if (upstreamOpen && upstream.readyState === WebSocket.OPEN) {
       upstream.send(frame.opcode === 0x1 ? frame.payload.toString("utf8") : webSocketBinary(frame.payload));
       return;
@@ -780,6 +797,7 @@ export async function startDeviceInProcess(udid: string, port: number, base: str
     });
     if (!booted) return `Device ${udid} failed to reach booted state`;
   }
+  rememberPreview(udid, port, base);
   writeServeSimState(inProcessServeSimState(udid, port, base));
   return null;
 }
@@ -1066,6 +1084,7 @@ function loadHtml(): string {
 }
 
 interface SimctlDevice {
+  isEmulator?: boolean;
   platform?: DevicePlatform;
   udid: string;
   name: string;
@@ -1092,7 +1111,7 @@ function listAllSimulators(): Promise<SimctlDevice[]> {
               if (!/SimRuntime\.(iOS|watchOS|visionOS|xrOS)-/i.test(runtime)) continue;
               for (const d of devices) {
                 if (d.isAvailable === false) continue;
-                out.push({ ...d, platform: "ios", runtime: runtime.replace(/^.*SimRuntime\./, "") });
+                out.push({ ...d, isEmulator: true, platform: "ios", runtime: runtime.replace(/^.*SimRuntime\./, "") });
               }
             }
           } catch {}
@@ -1100,6 +1119,7 @@ function listAllSimulators(): Promise<SimctlDevice[]> {
         for (const d of listAndroidTargets()) {
           out.push({
             platform: "android",
+            isEmulator: d.isEmulator,
             udid: d.device,
             name: d.name,
             runtime: d.runtime,
@@ -1354,7 +1374,29 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
     return { ok: true };
   };
 
+  let recovery: Promise<void> | undefined;
+  const restorePreviews = async (port: number) => {
+    const states = await readServeSimStates();
+    // Migrate previews already active before this feature was installed.
+    for (const state of states) {
+      if ((state.platform ?? "ios") === "ios" && state.port === port && state.streamUrl.includes("/helper/")) {
+        rememberPreview(state.device, port, base);
+      }
+    }
+    const booted = await getBootedUdids();
+    if (!booted) return;
+    for (const device of rememberedPreviews(port, base)) {
+      if (!booted.has(device)) { forgetPreview(device); continue; }
+      if (states.some((state) => state.device === device)) continue;
+      writeServeSimState(inProcessServeSimState(device, port, base));
+    }
+  };
+
   const middleware = (async (req: SimReq, res: SimRes, next?: SimNext) => {
+    recovery ??= restorePreviews(req.socket.localPort ?? 0).catch((err) => {
+      console.warn("[preview] recovery failed", String(err));
+    });
+    await recovery;
     const rawUrl: string = req.url ?? "";
     const qIndex = rawUrl.indexOf("?");
     const url = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
@@ -1529,6 +1571,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         const remoteHelper = helper ? rewriteStateForRequestHost(helper, hostForRequest(req), base, httpProtocolForRequest(req), proxyHelpers) : null;
         return {
           device: d.udid,
+          isEmulator: d.isEmulator === true,
           platform: d.platform ?? "ios",
           name: d.name,
           runtime: d.runtime,
@@ -1584,6 +1627,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         // Stop our own in-process capture for this device first (no-op if it
         // isn't streamed here). This frees the native session immediately
         // rather than waiting for the next poll's reaper to notice.
+        forgetPreview(udid);
         if (platform === "ios") closeDeviceSession(udid);
         // Drop the snapshot so the next /grid/api call re-queries simctl
         // and prunes any helper bound to this now-shutdown device.
@@ -1626,6 +1670,78 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       return;
     }
 
+    if (url === base + "/android-permissions" && req.method === "POST") {
+      res.setHeader("Content-Type", "application/json");
+      const token = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "")?.[1]?.trim();
+      if (!isJsonContentType(req.headers["content-type"]) || !token || !safeEqualString(token, execToken)) {
+        res.writeHead(403); res.end(JSON.stringify({ error: "Unauthorized" })); return;
+      }
+      let body = "";
+      for await (const chunk of req) {
+        body += chunk.toString();
+        if (body.length > 8192) { res.writeHead(413); res.end("{}"); return; }
+      }
+      try {
+        res.end(JSON.stringify(androidPermissions(JSON.parse(body))));
+      } catch (error) {
+        res.writeHead(400); res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (url === base + "/android-location" && req.method === "POST") {
+      res.setHeader("Content-Type", "application/json");
+      const token = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "")?.[1]?.trim();
+      if (!isJsonContentType(req.headers["content-type"]) || !token || !safeEqualString(token, execToken)) {
+        res.writeHead(403); res.end(JSON.stringify({ error: "Unauthorized" })); return;
+      }
+      let body = "";
+      for await (const chunk of req) {
+        body += chunk.toString();
+        if (body.length > 8192) { res.writeHead(413); res.end("{}"); return; }
+      }
+      try {
+        res.end(JSON.stringify(await setAndroidLocation(JSON.parse(body))));
+      } catch (error) {
+        res.writeHead(400); res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+      }
+      return;
+    }
+
+    if (url === base + "/android-camera" && req.method === "POST") {
+      res.setHeader("Content-Type", "application/json");
+      const token = /^Bearer\s+(.+)$/i.exec(req.headers.authorization ?? "")?.[1]?.trim();
+      if (!isJsonContentType(req.headers["content-type"]) || !token || !safeEqualString(token, execToken)) {
+        res.writeHead(403); res.end(JSON.stringify({ error: "Unauthorized" })); return;
+      }
+      let body = "";
+      for await (const chunk of req) {
+        body += chunk.toString();
+        if (body.length > 8192) { res.writeHead(413); res.end("{}"); return; }
+      }
+      try {
+        const request = JSON.parse(body);
+        const result = request.action === "scene" ? await controlAndroidScene(request)
+          : request.action === "cameras" ? await androidHostCameras(request.device, request.mode)
+          : request.action === "status" ? androidCameraStatus(request.device)
+          : beginAndroidCamera(request, async (device) => {
+            const cli = resolveServeSimCommand();
+            if (!cli) throw new Error("serve-sim CLI not found");
+            await new Promise<void>((resolve, reject) => {
+              const child = spawn(cli.command, [...cli.baseArgs, "--detach", "--platform", "android", device],
+                { stdio: ["ignore", "ignore", "pipe"] });
+              let error = "";
+              child.stderr?.on("data", chunk => { error = (error + chunk).slice(-4000); });
+              const timer = setTimeout(() => { child.kill(); reject(new Error("Preview reconnect timed out")); }, 120_000);
+              child.on("error", err => { clearTimeout(timer); reject(err); });
+              child.on("close", code => { clearTimeout(timer); if (code === 0) resolve(); else reject(new Error(error || "Preview reconnect failed")); });
+            });
+          });
+        res.end(JSON.stringify(result));
+      } catch (error) { res.writeHead(400); res.end(JSON.stringify({ error: String(error) })); }
+      return;
+    }
+
     // Start streaming a device. iOS boots in-process; Android spawns a detached
     // serve-sim helper bound to the emulator or physical device.
     if (url === base + "/grid/api/start" && req.method === "POST") {
@@ -1636,9 +1752,11 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       req.on("end", () => {
         let udid = "";
         let platform: DevicePlatform = "ios";
+        let showWindow = false;
         try {
           const parsed = JSON.parse(body) as StartRequestBody;
           udid = parsed.udid ?? "";
+          showWindow = parsed.showWindow === true;
           const parsedPlatform = normalizeRequestPlatform(parsed.platform);
           if (!parsedPlatform) {
             res.writeHead(400, { "Content-Type": "application/json" });
@@ -1665,7 +1783,8 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           const child = spawn(
             resolved.command,
             [...resolved.baseArgs, "--detach", "--platform", platform, udid],
-            { stdio: ["ignore", "pipe", "pipe"], detached: false },
+            { stdio: ["ignore", "pipe", "pipe"], detached: false,
+              env: { ...process.env, SERVE_SIM_SHOW_WINDOW: showWindow ? "1" : "0" } },
           );
           let stdout = "";
           let stderr = "";
@@ -1696,12 +1815,23 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
           return;
         }
         const port = req.socket.localPort ?? 0;
-        void startDeviceInProcess(udid, port, base).then((error) => {
+        void startDeviceInProcess(udid, port, base).then(async (error) => {
           if (res.writableEnded) return;
           if (error) {
             res.writeHead(500, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: false, error }));
           } else {
+            if (showWindow) {
+              const openError = await new Promise<string | null>((resolve) => {
+                execFile("open", ["-a", "Simulator", "--args", "-CurrentDeviceUDID", udid],
+                  { timeout: 5000 }, (err) => resolve(err?.message ?? null));
+              });
+              if (openError) {
+                res.writeHead(500, { "Content-Type": "application/json" });
+                res.end(JSON.stringify({ ok: false, error: openError }));
+                return;
+              }
+            }
             res.writeHead(200, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ ok: true }));
           }
@@ -1988,8 +2118,20 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
         return;
       }
       if ((state.platform ?? "ios") === "android") {
-        res.writeHead(503, { "Content-Type": "text/plain; charset=utf-8" });
-        res.end("Accessibility not available for Android");
+        res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" });
+        res.write(":\n\n");
+        let closed = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const poll = async () => {
+          let snapshot;
+          try { snapshot = await androidAxSnapshot(state.device); }
+          catch { snapshot = { screen: {width:1,height:1}, elements: [], errors: ["Android accessibility unavailable. Retrying…"] }; }
+          if (closed || res.destroyed) return;
+          res.write(`data: ${JSON.stringify(snapshot)}\n\n`);
+          timer = setTimeout(poll, 1500);
+        };
+        req.on("close", () => { closed = true; if (timer) clearTimeout(timer); });
+        void poll();
         return;
       }
       res.writeHead(200, {
@@ -2289,7 +2431,7 @@ export function simMiddleware(options?: SimMiddlewareOptions): SimMiddleware {
       void readServeSimStates().then((states) => {
         const helper = selectServeSimState(states, device);
         if (helper?.platform === "android") {
-          bridgeWebSocketFrames(req, socket, head, `ws://127.0.0.1:${helper.port}/ws`);
+          bridgeWebSocketFrames(req, socket, head, `ws://127.0.0.1:${helper.port}/ws`, device ?? undefined);
           return;
         }
         if (attachHidInProcess(req, socket, head, device)) return;

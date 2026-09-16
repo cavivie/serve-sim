@@ -1,6 +1,6 @@
 import { getDeviceType } from "../simulator";
 import { X } from "lucide-react";
-import { type GridDevice, runtimeVersion } from "../utils/grid";
+import { type GridDevice, runtimeVersion, runtimeLabel } from "../utils/grid";
 import { DeviceGlyph } from "./device-glyph";
 
 // A single horizontal device row in the sidebar (Xcode-style): family glyph,
@@ -50,6 +50,7 @@ export function DeviceRow({
   return (
     <div
       role="button"
+      title={runtimeLabel(device.runtime)}
       tabIndex={0}
       aria-pressed={active}
       onClick={onSelect}
@@ -97,7 +98,7 @@ export function DeviceRow({
         className="relative shrink-0 w-8 h-6 flex items-center justify-end"
       >
         <span
-          className={`absolute right-0 text-[11px] font-mono tabular-nums [transition:opacity_0.12s] ${
+          className={`absolute right-0 whitespace-nowrap text-[11px] font-mono tabular-nums [transition:opacity_0.12s] ${
             active ? "text-white/85" : "text-white/40"
           } ${canShutdown ? "group-hover:opacity-0 group-focus-within:opacity-0" : ""}`}
         >

@@ -127,7 +127,7 @@ const mwResult = await Bun.build({
   format: "esm",
   minify: true,
   outdir: distDir,
-  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module", "ws"],
+  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module", "ws", "@grpc/grpc-js", "@grpc/proto-loader"],
   define: PREVIEW_DEFINE,
   sourcemap: "linked",
 });
@@ -154,7 +154,7 @@ const binJsResult = await Bun.build({
   minify: true,
   outdir: distDir,
   naming: "serve-sim.js",
-  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module", "ws"],
+  external: ["fs", "path", "os", "child_process", "url", "net", "tls", "crypto", "stream", "events", "http", "https", "zlib", "buffer", "module", "ws", "@grpc/grpc-js", "@grpc/proto-loader"],
   define: PREVIEW_DEFINE,
   sourcemap: "linked",
 });
@@ -185,6 +185,8 @@ const compile = spawnSync(
     // native implementation — bundling the Node implementation breaks
     // upgrades (raw handshake writes never flush under Bun's node:http).
     "--external", "ws",
+    "--external", "@grpc/grpc-js",
+    "--external", "@grpc/proto-loader",
   ],
   { stdio: "inherit" },
 );

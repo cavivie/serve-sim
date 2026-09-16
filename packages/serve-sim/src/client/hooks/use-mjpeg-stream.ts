@@ -47,7 +47,7 @@ export function useMjpegStream(streamUrl: string | null) {
       if (subscribersRef.current.size === 0) return;
       // Blob copies the bytes, so handing it a subarray view is safe even as
       // the underlying accumulation buffer is reused/compacted.
-      const blobUrl = URL.createObjectURL(new Blob([jpeg as BlobPart], { type: "image/jpeg" }));
+      const blobUrl = URL.createObjectURL(new Blob([jpeg as BlobPart], { type: jpeg[0] === 0x89 && jpeg[1] === 0x50 ? "image/png" : "image/jpeg" }));
       for (const cb of subscribersRef.current) cb(blobUrl);
     };
 

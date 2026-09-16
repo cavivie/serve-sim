@@ -1,4 +1,5 @@
 export interface GridDevice {
+  isEmulator?: boolean;
   device: string;
   platform?: "ios" | "android";
   name: string;
@@ -78,12 +79,12 @@ export interface MemoryReport {
   estimatedAdditional: number;
 }
 
-type DeviceActionTarget = Pick<GridDevice, "platform" | "state" | "runtime">;
+type DeviceActionTarget = Pick<GridDevice, "platform" | "state" | "runtime" | "isEmulator">;
 
 export function canStartDevice(device: DeviceActionTarget): boolean {
   if ((device.platform ?? "ios") !== "android") return true;
   if (device.state === "Booted") return true;
-  return device.state === "Shutdown" && /Android Emulator/i.test(device.runtime);
+  return device.state === "Shutdown" && (device.isEmulator === true || (device.isEmulator === undefined && /Android Emulator/i.test(device.runtime)));
 }
 
 export function canShutdownDevice(platform: GridDevice["platform"], deviceId: string): boolean {
@@ -113,6 +114,11 @@ export function parseRuntime(runtime: string): { os: string; version: string } {
 
 /** Just the dotted version, e.g. `26.5`. */
 export function runtimeVersion(runtime: string): string {
+  const android = runtime.match(/^Android\s+(\d+(?:\.\d+)*)/);
+  if (android) return android[1]!;
+  const api = runtime.match(/^Android API (\d+)$/);
+  if (api) return `API ${api[1]}`;
+  if (runtime === "Android Emulator" || runtime === "Android") return "";
   return parseRuntime(runtime).version || runtime;
 }
 

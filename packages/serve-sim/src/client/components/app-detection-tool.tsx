@@ -67,8 +67,10 @@ export function AppIcon({
 export function AppDetectionTool({
   udid,
   currentApp,
+  platform = "ios",
 }: {
   udid: string;
+  platform?: "ios" | "android";
   currentApp: { bundleId: string; isReactNative: boolean; pid?: number } | null;
 }) {
   const [details, setDetails] = useState<AppDetails | null>(null);
@@ -83,7 +85,7 @@ export function AppDetectionTool({
       pid: currentApp.pid,
       loading: true,
     });
-    fetchAppDetails(execOnHost, udid, currentApp.bundleId).then((extra) => {
+    fetchAppDetails(execOnHost, udid, currentApp.bundleId, platform).then((extra) => {
       if (cancelled) return;
       setDetails({
         bundleId: currentApp.bundleId,
@@ -94,7 +96,7 @@ export function AppDetectionTool({
       });
     });
     return () => { cancelled = true; };
-  }, [udid, currentApp, currentApp?.bundleId, currentApp?.pid, currentApp?.isReactNative]);
+  }, [platform, udid, currentApp, currentApp?.bundleId, currentApp?.pid, currentApp?.isReactNative]);
 
   if (!details) {
     return <AppDetectionSkeleton />;
@@ -123,8 +125,8 @@ export function AppDetectionTool({
 
       <dl className="m-0 flex flex-col gap-1.5">
             <Row label="Version" value={details.shortVersion ? `${details.shortVersion} (${details.bundleVersion ?? "—"})` : details.loading ? "…" : "—"} />
-            <Row label="Min iOS" value={details.minOS ?? (details.loading ? "…" : "—")} />
-            <Row label="Executable" value={details.executable ?? (details.loading ? "…" : "—")} />
+            <Row label={platform === "android" ? "Min SDK" : "Min iOS"} value={details.minOS ?? (details.loading ? "…" : "—")} />
+            {platform === "ios" ? <Row label="Executable" value={details.executable ?? (details.loading ? "…" : "—")} /> : <Row label="Target SDK" value={details.targetSdk ?? (details.loading ? "…" : "—")} />}
             <Row label="PID" value={details.pid != null ? String(details.pid) : "—"} />
             {details.isReactNative && <Row label="React Native" value="Yes" />}
             <Row
@@ -132,7 +134,7 @@ export function AppDetectionTool({
               value={details.appPath ?? (details.loading ? "…" : "—")}
               mono
               action={
-                details.appPath
+                details.appPath && platform === "ios"
                   ? {
                       title: "Reveal in Finder",
                       onClick: () => { execOnHost(`open -R ${shellEscape(details.appPath!)}`); },
@@ -144,6 +146,13 @@ export function AppDetectionTool({
               }
             />
           </dl>
+          {<button type="button"
+            className="mt-3 text-xs text-blue-400 hover:text-blue-300"
+            onClick={() => { void execOnHost(platform === "android"
+              ? `adb -s ${shellEscape(udid)} shell am start -a android.settings.APPLICATION_DETAILS_SETTINGS -d ${shellEscape(`package:${details.bundleId}`)}`
+              : `xcrun simctl launch ${shellEscape(udid)} com.apple.Preferences`); }}>
+            {platform === "android" ? "Open app settings" : "Open Settings"}
+          </button>}
     </CollapsibleSection>
   );
 }

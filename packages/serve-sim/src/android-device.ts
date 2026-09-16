@@ -1,5 +1,6 @@
+import { environmentBootArgs } from "./android-environment";
 import { execFileSync, spawn } from "child_process";
-import { existsSync, openSync, closeSync } from "fs";
+import { existsSync, readFileSync, openSync, closeSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
@@ -123,7 +124,7 @@ function describeRunningDevice(device: ParsedAdbDevice): AndroidTarget {
   const release = getAndroidProp(device.serial, "ro.build.version.release");
   const api = getAndroidProp(device.serial, "ro.build.version.sdk");
   const avdName = isEmulator
-    ? getAndroidProp(device.serial, "ro.kernel.qemu.avd_name") || undefined
+    ? getAndroidProp(device.serial, "ro.boot.qemu.avd_name") || getAndroidProp(device.serial, "ro.kernel.qemu.avd_name") || undefined
     : undefined;
   const name = avdName
     ? avdName.replace(/_/g, " ")
@@ -153,6 +154,34 @@ export function listRunningAndroidDevices(): AndroidTarget[] {
   }
 }
 
+function readProperties(path: string): Record<string, string> {
+  try {
+    return Object.fromEntries(readFileSync(path, "utf8").split(/\r?\n/)
+      .filter((line) => !line.trim().startsWith("#") && line.includes("="))
+      .map((line) => { const i = line.indexOf("="); return [line.slice(0, i).trim(), line.slice(i + 1).trim()]; }));
+  } catch { return {}; }
+}
+
+function avdRuntime(avdName: string): string {
+  const userHome = process.env.ANDROID_USER_HOME || join(homedir(), ".android");
+  const avdHome = process.env.ANDROID_AVD_HOME || join(userHome, "avd");
+  const entry = readProperties(join(avdHome, `${avdName}.ini`));
+  const config = readProperties(join(entry.path || join(avdHome, `${avdName}.avd`), "config.ini"));
+  const imagePath = config["image.sysdir.1"];
+  for (const root of sdkRoots()) {
+    if (!imagePath) break;
+    const image = imagePath.startsWith("/") ? imagePath : join(root, imagePath);
+    const props = readProperties(join(image, "source.properties"));
+    const build = readProperties(join(image, "build.prop"));
+    const release = build["ro.build.version.release"];
+    const api = props["AndroidVersion.ApiLevel"];
+    if (release) return `Android ${release}${api ? ` (API ${api})` : ""}`;
+    if (api) return `Android API ${api}`;
+  }
+  const api = (config.target || entry.target || "").match(/^android-(\d+)$/)?.[1];
+  return api ? `Android API ${api}` : "Android Emulator";
+}
+
 export function listAndroidAvds(): AndroidTarget[] {
   const emulator = findEmulator();
   if (!emulator) return [];
@@ -171,7 +200,7 @@ export function listAndroidAvds(): AndroidTarget[] {
         device: avdName,
         avdName,
         name: avdName.replace(/_/g, " "),
-        runtime: "Android Emulator",
+        runtime: avdRuntime(avdName),
         state: "Shutdown" as const,
         isEmulator: true,
       }));
@@ -301,7 +330,7 @@ export async function ensureAndroidBooted(target: AndroidTarget, logFile?: strin
   let outFd: number | undefined;
   try {
     if (logFile) outFd = openSync(logFile, "a");
-    const child = spawn(emulator, ["-avd", target.avdName], {
+    const child = spawn(emulator, ["-avd", target.avdName, ...await environmentBootArgs(emulator, target.avdName), ...(process.env.SERVE_SIM_SHOW_WINDOW === "1" ? [] : ["-no-window"])], {
       detached: true,
       stdio: ["ignore", outFd ?? "ignore", outFd ?? "ignore"],
     });

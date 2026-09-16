@@ -221,10 +221,13 @@ export function SimulatorResizeCornerHandle({
       onBlur={() => setFocusVisible(false)}
       style={{
         position: "absolute",
-        right: -14,
-        bottom: -14,
+        // Keep both the painted arc and its hit target outside the screen.
+        // The old 60px square overlapped 46px of the device in each axis.
+        right: -24,
+        bottom: -24,
         width: 60,
         height: 60,
+        clipPath: "polygon(36px 0, 100% 0, 100% 100%, 0 100%, 0 36px, 36px 36px)",
         border: "none",
         padding: 0,
         margin: 0,

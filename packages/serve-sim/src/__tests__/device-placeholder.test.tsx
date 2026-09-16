@@ -133,3 +133,18 @@ describe("DevicePlaceholder", () => {
     expect(html).toContain("SideButton");
   });
 });
+
+ test("physical devices have neither simulator label nor window toggle", () => {
+  const html = renderToStaticMarkup(<DevicePlaceholder name="Pixel 6 Pro"
+    runtime="Android 16 (API 36)" isEmulator={false} busy={false}
+    error={null} onStart={() => {}} />);
+  expect(html).not.toContain("Simulator");
+  expect(html).not.toContain("Show simulator window");
+ });
+ test("emulators show the window toggle", () => {
+  const html = renderToStaticMarkup(<DevicePlaceholder name="Pixel 8a"
+    runtime="Android 16 (API 36)" isEmulator busy={false}
+    error={null} onStart={() => {}} />);
+  expect(html).toContain("Simulator");
+  expect(html).toContain("Show simulator window");
+ });

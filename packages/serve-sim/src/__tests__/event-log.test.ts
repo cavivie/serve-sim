@@ -284,3 +284,12 @@ describe("eventLogEventForCommand", () => {
     ).toBeNull();
   });
 });
+
+test("Android commands are classified without exposing paths or query output", () => {
+  const shot = eventLogEventForCommand('F="/tmp/private.png"; adb -s emulator-5556 exec-out screencap -p > "$F"', { exitCode: 0 });
+  expect(shot?.device).toBe("emulator-5556");
+  expect(shot?.action).toBe("screenshot");
+  expect(JSON.stringify(shot)).not.toContain("private.png");
+  expect(eventLogEventForCommand("adb -s emulator-5556 shell dumpsys package com.example")).toBeNull();
+  expect(eventLogEventForCommand("adb -s emulator-5556 emu geo fix 1 2", { exitCode: 1 })?.status).toBe("error");
+});

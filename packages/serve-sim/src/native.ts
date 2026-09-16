@@ -33,7 +33,7 @@ interface SimHIDHandle {
 }
 
 interface SimCaptureHandle {
-  start(): void;
+  start(): Promise<void>;
   stop(): void;
   subscribe(codec: number, onFrame: RawFrameCallback): Promise<() => void>;
 }
@@ -197,8 +197,8 @@ export class NativeCapture {
   }
 
   /** Begin capturing. Throws if the device isn't booted. */
-  start(): void {
-    this.handle.start();
+  start(): Promise<void> {
+    return this.handle.start();
   }
 
   subscribeMjpeg(onFrame: (frame: MjpegFrame) => Promise<void>): Promise<() => void> {

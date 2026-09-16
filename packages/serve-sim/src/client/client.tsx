@@ -1,3 +1,4 @@
+import { AndroidCameraProgress } from "./components/android-camera-tool";
 import { createRoot } from "react-dom/client";
 import {
   useCallback,
@@ -36,7 +37,6 @@ import { DeviceSidebarToggle } from "./components/device-sidebar-toggle";
 import { DevicePlaceholder } from "./components/device-placeholder";
 import { DeviceKitChrome, type ChromeButtonPress } from "./components/device-chrome-frame";
 import { GridPanel } from "./components/grid-panel";
-import { PlatformBadge } from "./components/platform-badge";
 import type { DevicePlatform } from "./components/platform-badge";
 import { ResizeHandle } from "./components/resize-handle";
 import { SimulatorResizeCornerHandle } from "./components/simulator-resize-corner-handle";
@@ -185,7 +185,7 @@ function App() {
   );
 
   const startDevice = useCallback(
-    async (udid: string) => {
+    async (udid: string, showWindow = false) => {
       setStarting((p) => ({ ...p, [udid]: true }));
       setActionErrors((e) => ({ ...e, [udid]: null }));
       try {
@@ -193,7 +193,7 @@ function App() {
         const res = await fetch(gridStartEndpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ udid, platform: device?.platform ?? "ios" }),
+          body: JSON.stringify({ udid, platform: device?.platform ?? "ios", showWindow }),
         });
         const json = await res.json().catch(() => ({}));
         if (!res.ok || !json.ok) {
@@ -297,6 +297,7 @@ function App() {
   if (isStreaming && config) {
     mainView = (
       <AppWithConfig
+        onShutdown={shutdownDevice}
         config={config}
         deviceName={selectedDevice?.name ?? null}
         deviceRuntime={selectedDevice?.runtime ?? null}
@@ -325,6 +326,8 @@ function App() {
       >
         {selectedDevice ? (
           <DevicePlaceholder
+            key={selectedDevice.device}
+            isEmulator={selectedDevice.isEmulator === true}
             name={selectedDevice.name}
             runtime={selectedDevice.runtime}
             chrome={selectedDevice.chrome ?? null}
@@ -332,7 +335,7 @@ function App() {
             busy={!!selectedDevice.helper || !!starting[selectedDevice.device]}
             busyLabel={selectedDevice.helper ? "Connecting…" : "Starting…"}
             error={actionErrors[selectedDevice.device] ?? null}
-            onStart={() => startDevice(selectedDevice.device)}
+            onStart={(showWindow) => startDevice(selectedDevice.device, showWindow)}
           />
         ) : (
           <div className="flex flex-col items-center gap-3 text-center">
@@ -350,6 +353,7 @@ function App() {
   return (
     <>
       {mainView}
+      {effectiveUdid && /^emulator-\d+$/.test(effectiveUdid) && <AndroidCameraProgress key={effectiveUdid} udid={effectiveUdid} streaming={isStreaming} />}
       <ServeSimToaster />
       {/* Persistent left device sidebar — overlays every main view so swapping
           streams never remounts (and refetches) the picker. */}
@@ -383,6 +387,7 @@ function App() {
 }
 
 interface AppWithConfigProps {
+  onShutdown: (udid: string) => Promise<void>;
   config: PreviewConfig;
   deviceName: string | null;
   deviceRuntime: string | null;
@@ -403,6 +408,7 @@ interface AppWithConfigProps {
 }
 
 function AppWithConfig({
+  onShutdown,
   config,
   deviceName,
   deviceRuntime,
@@ -423,7 +429,7 @@ function AppWithConfig({
 }: AppWithConfigProps) {
   const platform = platformProp ?? config.platform ?? "ios";
   const isAndroid = platform === "android";
-  const supportsAx = !isAndroid;
+  const supportsAx = true;
   const supportsWebKitDevtools = !isAndroid;
 
   useEffect(() => {
@@ -451,7 +457,7 @@ function AppWithConfig({
 
   useEffect(() => {
     if (!isAndroid) return;
-    setAxOverlayEnabled(false);
+
     setDevtoolsOpen(false);
     setSelectedDevtoolsTargetId(null);
   }, [isAndroid, setAxOverlayEnabled, setDevtoolsOpen, setSelectedDevtoolsTargetId]);
@@ -497,10 +503,12 @@ function AppWithConfig({
   const useAvccVideo =
     !isAndroid &&
     !serverForcesMjpeg && avcc.supported && !avccFallback.fellBack && !preferMjpeg && !forceMjpeg && codecPreference !== "mjpeg";
-  const h264 = useH264Stream(config.streamUrl, isAndroid);
+  const androidWantsH264 = isAndroid && !serverForcesMjpeg && codecPreference !== "mjpeg";
+  const h264 = useH264Stream(config.streamUrl, androidWantsH264);
+  const useAndroidH264 = androidWantsH264 && h264.supported !== false;
   const mjpeg = useMjpegStream(
     isAndroid
-      ? (h264.supported === false ? config.streamUrl : null)
+      ? (!useAndroidH264 ? config.streamUrl : null)
       : (useAvccVideo ? null : config.streamUrl),
   );
   const toolbarStreaming = isAndroid ? !!config.device : streaming;
@@ -528,7 +536,7 @@ function AppWithConfig({
   // Screen config now arrives over the input WebSocket (pushed by the helper on
   // connect + on every dimension/orientation change) instead of a 1s /config poll.
   const [wsStreamConfig, setWsStreamConfig] = useState<StreamConfig | null>(null);
-  const confirmedStreamConfig = isAndroid ? h264.config : wsStreamConfig;
+  const confirmedStreamConfig = isAndroid && useAndroidH264 ? h264.config : wsStreamConfig;
   const streamConfig = confirmedStreamConfig;
   const activeStreamConfig = liveStreamConfig ?? streamConfig ?? fallbackScreenSize(deviceType, deviceName);
   const imgBorderRadius = screenBorderRadius(deviceType, activeStreamConfig);
@@ -846,7 +854,7 @@ function AppWithConfig({
   }, [sendWs, config.device, platform, rotateBy]);
 
   const uploads = useUploadToasts();
-  const screenshot = useScreenshotToast(config.device);
+  const screenshot = useScreenshotToast(config.device, isAndroid ? "android" : "ios");
   const mediaDrop = useMediaDrop({
     exec: execOnHost,
     udid: config.device,
@@ -951,7 +959,6 @@ function AppWithConfig({
             hideChevron
             name={(
               <span className="inline-flex min-w-0 items-center gap-1.5">
-                <PlatformBadge platform={platform} compact />
                 <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
                   {deviceName ?? "Device"}
                 </span>
@@ -1015,11 +1022,11 @@ function AppWithConfig({
                 onAvccError={() => dispatchAvccFallback("error")}
                 subscribeFrame={
                   isAndroid
-                    ? (h264.supported === false ? mjpeg.subscribeFrame : undefined)
+                    ? (!useAndroidH264 ? mjpeg.subscribeFrame : undefined)
                     : (useAvccVideo ? undefined : mjpeg.subscribeFrame)
                 }
                 subscribeVideoFrame={
-                  isAndroid && h264.supported !== false ? h264.subscribeVideoFrame : undefined
+                  useAndroidH264 ? h264.subscribeVideoFrame : undefined
                 }
                 streamFrame={useAvccVideo || isAndroid ? undefined : mjpeg.frame}
                 streamConfig={activeStreamConfig}
@@ -1087,7 +1094,7 @@ function AppWithConfig({
             visible={simulatorResize.isResizing || simulatorResize.isInertia}
           />
         </div>
-        <div className="inline-flex items-center justify-center gap-2 max-w-full">
+        <div className="mt-3 inline-flex flex-wrap items-center justify-center gap-2 w-max max-w-[calc(100vw-32px)] shrink-0">
           <SimulatorToolbar
             exec={execOnHost}
             onRotate={rotateDevice}
@@ -1099,7 +1106,8 @@ function AppWithConfig({
             aria-label="Simulator actions"
             style={{
               alignSelf: "center",
-              width: "auto",
+              width: "max-content",
+              flexShrink: 0,
               minWidth: 0,
               maxWidth: "100%",
               justifyContent: "center",
@@ -1107,7 +1115,7 @@ function AppWithConfig({
               borderRadius: 18,
             }}
           >
-            <SimulatorToolbar.Actions>
+            <SimulatorToolbar.Actions style={{ flexWrap: "wrap", flexShrink: 1, minWidth: 0, justifyContent: "center" }}>
               {currentApp?.isReactNative && (
                 <SimulatorToolbar.Button
                   aria-label="Reload React Native bundle"
@@ -1120,7 +1128,12 @@ function AppWithConfig({
               {isAndroid ? (
                 <AndroidDeviceControls onButton={onStreamButton} />
               ) : (
-                <SimulatorToolbar.HomeButton title="Home" />
+                <AndroidDeviceControls platform="ios" onButton={button => {
+                  if (button === "power") { void onShutdown(config.device); return; }
+                  if (button === "volume_up" || button === "volume_down") {
+                    sendWs(0x04, { page: 12, usage: button === "volume_up" ? 233 : 234, phase: "press" });
+                  } else onStreamButton(button === "recents" ? "app_switcher" : button);
+                }} />
               )}
               <SimulatorToolbar.ScreenshotButton
                 title="Screenshot"
@@ -1193,6 +1206,7 @@ function AppWithConfig({
       </div>
 
       <ToolsPanel
+        platform={isAndroid ? "android" : "ios"}
         open={panelOpen}
         onClose={() => setPanelOpen(false)}
         udid={config.device}
@@ -1203,8 +1217,8 @@ function AppWithConfig({
         onToggleAxOverlay={() => setAxOverlayEnabled((enabled) => !enabled)}
         codecPreference={codecPreference}
         onCodecPreferenceChange={setCodecPreference}
-        activeCodec={useAvccVideo ? "h264" : "mjpeg"}
-        avccSupported={avcc.supported}
+        activeCodec={useAvccVideo || useAndroidH264 ? "h264" : "mjpeg"}
+        avccSupported={!serverForcesMjpeg && (isAndroid ? typeof window.VideoDecoder !== "undefined" : avcc.supported)}
         width={toolsPanelWidth}
       />
       <ResizeHandle

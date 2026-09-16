@@ -1,6 +1,6 @@
 import { tmpdir } from "os";
 import { join } from "path";
-import { readdirSync, mkdirSync, writeFileSync, renameSync } from "fs";
+import { readdirSync, readFileSync, unlinkSync, mkdirSync, writeFileSync, renameSync } from "fs";
 
 /** Directory where serve-sim stores runtime state. */
 export const STATE_DIR = join(tmpdir(), "serve-sim");
@@ -71,4 +71,33 @@ export function listStateFiles(): string[] {
   } catch {
     return [];
   }
+}
+
+// Preview intent survives the process owning the transient device state.
+export function rememberPreview(device: string, port: number, base: string): void {
+  mkdirSync(STATE_DIR, { recursive: true });
+  const path = join(STATE_DIR, `preview-${port}-${device}.json`);
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ device, port, base }));
+  renameSync(tmp, path);
+}
+
+export function forgetPreview(device: string): void {
+  try {
+    for (const name of readdirSync(STATE_DIR)) {
+      if (name.startsWith("preview-") && name.endsWith(`-${device}.json`)) unlinkSync(join(STATE_DIR, name));
+    }
+  } catch {}
+}
+
+export function rememberedPreviews(port: number, base: string): string[] {
+  try {
+    return readdirSync(STATE_DIR).filter((name) => name.startsWith(`preview-${port}-`) && name.endsWith(".json"))
+      .flatMap((name) => {
+        try {
+          const entry = JSON.parse(readFileSync(join(STATE_DIR, name), "utf8"));
+          return entry.port === port && entry.base === base && /^[0-9a-f-]{36}$/i.test(entry.device) ? [entry.device] : [];
+        } catch { return []; }
+      });
+  } catch { return []; }
 }

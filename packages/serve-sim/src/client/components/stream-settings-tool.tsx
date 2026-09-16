@@ -37,7 +37,9 @@ export function StreamSettingsTool({
   onPreferenceChange,
   activeCodec,
   avccSupported,
+  platform = "ios",
 }: {
+  platform?: "ios" | "android";
   /** The user's saved codec preference. */
   preference: CodecPreference;
   onPreferenceChange: (next: CodecPreference) => void;
@@ -46,6 +48,8 @@ export function StreamSettingsTool({
   /** Whether this browser can decode H.264 (WebCodecs available). */
   avccSupported: boolean;
 }) {
+  const compatibilityCodec = platform === "android" ? "PNG" : "MJPEG";
+  const options = CODEC_OPTIONS.map(option => option.value === "mjpeg" ? { ...option, label: `${compatibilityCodec} (Compatibility)` } : option);
   const [open, setOpen] = useState(false);
 
   // Without WebCodecs the only option is MJPEG; reflect that in the control so
@@ -73,21 +77,22 @@ export function StreamSettingsTool({
       }
     >
       <div className="flex flex-col gap-1.5 pb-1.5">
+        <p className="text-[11px] text-white/70">Current codec: {activeCodec === "h264" ? "H.264" : compatibilityCodec}</p>
         <SettingRow icon={VideoIcon} label="Codec">
           <SettingSelect
             label="Codec"
             value={value}
-            options={CODEC_OPTIONS}
+            options={options}
             disabled={!avccSupported}
             onChange={(v) => onPreferenceChange(v as CodecPreference)}
           />
         </SettingRow>
         <p className="text-[11px] text-white/55 leading-snug px-0.5">
           {!avccSupported
-            ? "This browser can't decode H.264, so the stream uses MJPEG."
+            ? `H.264 is unavailable in this browser or disabled by the server. Using ${compatibilityCodec}.`
             : downgraded
-              ? "H.264 was unavailable for this stream, so it fell back to MJPEG."
-              : "Switch to MJPEG if the stream stutters or drops while screen recording the browser window."}
+              ? `H.264 was unavailable for this stream, so it fell back to ${compatibilityCodec}.`
+              : `Switch to ${compatibilityCodec} if the stream stutters. The compatibility mode may have a lower frame rate.`}
         </p>
       </div>
     </CollapsibleSection>

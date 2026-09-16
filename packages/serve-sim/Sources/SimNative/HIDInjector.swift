@@ -431,19 +431,18 @@ actor HIDInjector {
             launchSpringBoard(deviceUDID: deviceUDID)
 
         case "swipe_home":
-            sendSwipeHome()
+            await sendSwipeHome()
+
+        case "back":
+            rawSendTouch(type: "begin", x: 0.001, y: 0.5, edge: Self.edgeLeft)
+            for i in 1...16 {
+                rawSendTouch(type: "move", x: Double(i) * 0.05, y: 0.5, edge: Self.edgeLeft)
+                Thread.sleep(forTimeInterval: 0.016)
+            }
+            rawSendTouch(type: "end", x: 0.8, y: 0.5, edge: Self.edgeLeft)
 
         case "app_switcher":
-            if buttonFunc != nil {
-                // Double home press with delay for app switcher
-                sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonDown)
-                sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonUp)
-                try? await Task.sleep(for: .seconds(0.15))
-                sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonDown)
-                sendHIDButton(eventSource: Self.buttonSourceHome, direction: Self.buttonUp)
-            } else {
-                print("[hid] App switcher not available (IndigoHIDMessageForButton not loaded)")
-            }
+            await sendSwipeHome(hold: true)
 
         case "lock":
             sendHIDButton(eventSource: Self.buttonSourceLock, direction: Self.buttonDown)
@@ -523,28 +522,31 @@ actor HIDInjector {
     /// Synthesize a swipe-up-from-bottom gesture (Face ID "go home" gesture).
     /// Uses IndigoHIDEdge.bottom to flag touches as system edge gestures,
     /// which iOS interprets as the home indicator swipe.
-    private func sendSwipeHome() {
-        let xPos = 0.5
-        let yStart = 0.95
-        let yEnd = 0.35
-        let steps = 10
-        let stepDelay: TimeInterval = 0.016  // ~16ms per step
+    private func sendSwipeHome(hold: Bool = false) async {
+        let yStart = 0.995
+        let yEnd = hold ? 0.55 : 0.35
+        let steps = hold ? 25 : 10
         let edge = Self.edgeBottom
-
-        // Touch down at bottom edge
-        rawSendTouch(type: "begin", x: xPos, y: yStart, edge: edge)
-        Thread.sleep(forTimeInterval: stepDelay)
-
-        // Interpolated moves upward
+        rawSendTouch(type: "begin", x: 0.5, y: yStart, edge: edge)
+        try? await Task.sleep(for: .milliseconds(50))
         for i in 1...steps {
-            let t = Double(i) / Double(steps)
-            let y = yStart + (yEnd - yStart) * t
-            rawSendTouch(type: "move", x: xPos, y: y, edge: edge)
-            Thread.sleep(forTimeInterval: stepDelay)
+            let y = yStart + (yEnd - yStart) * Double(i) / Double(steps)
+            rawSendTouch(type: "move", x: 0.5, y: y, edge: edge)
+            try? await Task.sleep(for: .milliseconds(20))
         }
-
-        // Touch up
-        rawSendTouch(type: "end", x: xPos, y: yEnd, edge: edge)
+        var releaseX = 0.5
+        if hold {
+            // Yield while holding so HID delivery can drain. A short sideways
+            // finish commits the switcher instead of completing a home swipe.
+            try? await Task.sleep(for: .milliseconds(900))
+            for i in 1...12 {
+                releaseX = 0.5 + 0.18 * Double(i) / 12
+                rawSendTouch(type: "move", x: releaseX, y: yEnd, edge: edge)
+                try? await Task.sleep(for: .milliseconds(20))
+            }
+            try? await Task.sleep(for: .milliseconds(300))
+        }
+        rawSendTouch(type: "end", x: releaseX, y: yEnd, edge: edge)
     }
 
     private func launchSpringBoard(deviceUDID: String) {
